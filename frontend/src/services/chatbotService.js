@@ -11,6 +11,7 @@
 import { delay } from "./_utils";
 import * as storageService from "./storageService";
 import { currentFaculty, currentStudent, subjects as allSubjects, resultsData } from "../data/mockData";
+import { api, getToken } from "./api";
 
 // ---------------------------------------------------------------------
 // Small last-turn memory so short follow-ups like "What about Java?" or
@@ -402,12 +403,39 @@ function answerAdmin(question) {
 // ---------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------
-export function getBotReply(question, context = {}) {
+export async function getBotReply(question, context = {}) {
   const role = context.role || "student";
+  const history = context.history || [];
+
+  // Try real backend AI endpoint first if authenticated
+  const token = getToken();
+  if (token) {
+    try {
+      const formattedHistory = history
+        .filter((m) => m && m.text)
+        .map((m) => ({
+          role: m.from === "user" ? "user" : "model",
+          text: m.text,
+        }));
+
+      const res = await api.post("/ai/chat", {
+        message: question,
+        history: formattedHistory,
+      });
+
+      if (res?.data?.reply) {
+        return res.data.reply;
+      }
+    } catch (err) {
+      // If backend explicitly responded or network error, fallback to smart local answers
+    }
+  }
+
+  // Graceful local engine fallback
   let answer;
   if (role === "student") answer = answerStudent(question);
   else if (role === "faculty") answer = answerFaculty(question);
   else if (role === "admin") answer = answerAdmin(question);
   else answer = "I'm not sure how to help with that yet.";
-  return delay(answer, 700);
+  return delay(answer, 500);
 }

@@ -20,16 +20,30 @@ export default function StudentChatbot() {
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, typing]);
 
   async function send(text) {
+    if (typing) return;
     const content = text ?? input;
-    if (!content.trim()) return;
-    setMessages((m) => [...m, { id: Date.now(), from: "user", text: content }]);
+    if (!content || !content.trim()) return;
+    const userMsg = { id: Date.now(), from: "user", text: content.trim() };
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
     setInput("");
     setTyping(true);
     try {
-      const reply = await chatbotService.getBotReply(content, { role, user });
+      const reply = await chatbotService.getBotReply(content.trim(), {
+        role,
+        user,
+        history: nextMessages,
+      });
       setMessages((m) => [...m, { id: Date.now() + 1, from: "bot", text: reply }]);
     } catch {
-      setMessages((m) => [...m, { id: Date.now() + 1, from: "bot", text: "Sorry, I couldn't process that. Please try again." }]);
+      setMessages((m) => [
+        ...m,
+        {
+          id: Date.now() + 1,
+          from: "bot",
+          text: "I'm temporarily having trouble reaching the assistant service. Please check your connection or try again in a moment.",
+        },
+      ]);
     } finally {
       setTyping(false);
     }
@@ -77,8 +91,20 @@ export default function StudentChatbot() {
             ))}
           </div>
           <form onSubmit={(e) => { e.preventDefault(); send(); }} className="flex gap-2">
-            <input className="input" value={input} onChange={(e) => setInput(e.target.value)} placeholder="Type your question..." />
-            <button type="submit" className="btn-primary shrink-0"><Send size={16} /></button>
+            <input
+              className="input"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={typing ? "AI is generating a response..." : "Type your question..."}
+              disabled={typing}
+            />
+            <button
+              type="submit"
+              disabled={typing || !input.trim()}
+              className="btn-primary shrink-0 disabled:opacity-50"
+            >
+              <Send size={16} />
+            </button>
           </form>
         </div>
       </div>

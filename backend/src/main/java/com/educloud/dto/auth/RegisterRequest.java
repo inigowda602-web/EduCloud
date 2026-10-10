@@ -5,11 +5,17 @@ import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Getter;
+import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 @Getter
 @Setter
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class RegisterRequest {
 
     @NotBlank
@@ -20,7 +26,7 @@ public class RegisterRequest {
     private String email;
 
     @NotBlank
-    @Size(min = 8, message = "Password must be at least 8 characters.")
+    @Size(min = 6, message = "Password must be at least 6 characters.")
     private String password;
 
     @NotNull
@@ -35,4 +41,9 @@ public class RegisterRequest {
 
     // Faculty-only fields
     private String designation;
+
+    // Member/Student/Faculty ID support
+    private String memberId;
+    private String referenceId;
 }
+

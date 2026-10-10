@@ -1,134 +1,239 @@
 package com.educloud.service;
 
-import com.educloud.dto.AuthResponse;
-import com.educloud.dto.LoginRequest;
-import com.educloud.dto.RegisterRequest;
-import com.educloud.model.Faculty;
-import com.educloud.model.Student;
-import com.educloud.model.User;
-import com.educloud.repository.FacultyRepository;
-import com.educloud.repository.StudentRepository;
-import com.educloud.repository.UserRepository;
-import com.educloud.security.JwtTokenProvider;
+import com.educloud.dto.auth.AuthResponse;
+import com.educloud.dto.auth.LoginRequest;
+import com.educloud.dto.auth.RegisterRequest;
+import com.educloud.dto.auth.UserSummary;
+import com.educloud.entity.*;
+import com.educloud.exception.BadRequestException;
+import com.educloud.exception.ConflictException;
+import com.educloud.repository.*;
+import com.educloud.security.AppUserDetailsService;
+import com.educloud.security.CurrentUserService;
+import com.educloud.security.JwtService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class AuthService {
 
     private final UserRepository userRepository;
     private final StudentRepository studentRepository;
     private final FacultyRepository facultyRepository;
+    private final AdminRepository adminRepository;
+    private final DepartmentRepository departmentRepository;
+    private final CourseRepository courseRepository;
+    private final ClassStudentRepository classStudentRepository;
+    private final AdminCatalogService adminCatalogService;
+    private final PasswordResetTokenRepository passwordResetTokenRepository;
     private final PasswordEncoder passwordEncoder;
-    private final JwtTokenProvider jwtTokenProvider;
+    private final JwtService jwtService;
+    private final AppUserDetailsService userDetailsService;
+    private final CurrentUserService currentUserService;
+    private final EmailService emailService;
 
-    public AuthResponse login(LoginRequest request) {
-        User user = userRepository.findByEmail(request.getEmail())
-                .orElseThrow(() -> new RuntimeException("Invalid email or password"));
-
-        if (!passwordEncoder.matches(request.getPassword(), user.getPassword())) {
-            throw new RuntimeException("Invalid email or password");
+    @Transactional
+    public AuthResponse register(RegisterRequest request) {
+        String email = request.getEmail().trim().toLowerCase(Locale.ROOT);
+        if (userRepository.existsByEmailIgnoreCase(email)) {
+            throw new ConflictException("An account with this email already exists.");
         }
 
-        String token = jwtTokenProvider.generateToken(user.getEmail(), user.getRole().name());
+        User user = User.builder()
+                .name(request.getName().trim())
+                .email(email)
+                .passwordHash(passwordEncoder.encode(request.getPassword()))
+                .phone(request.getPhone())
+                .role(request.getRole())
+                .enabled(true)
+                .build();
+        user = userRepository.save(user);
+
+        if (request.getRole() == Role.ADMIN) {
+            adminRepository.save(Admin.builder()
+                    .user(user)
+                    .designation("System Administrator")
+                    .build());
+        } else if (request.getRole() == Role.STUDENT) {
+            String refId = request.getMemberId() != null && !request.getMemberId().isBlank()
+                    ? request.getMemberId().trim()
+                    : (request.getReferenceId() != null && !request.getReferenceId().isBlank() ? request.getReferenceId().trim() : null);
+
+            Optional<Student> existingStudent = (refId != null)
+                    ? studentRepository.findByRollNoIgnoreCase(refId)
+                    : Optional.empty();
+
+            if (existingStudent.isPresent()) {
+                Student student = existingStudent.get();
+                student.setUser(user);
+                studentRepository.save(student);
+            } else {
+                Department dept = null;
+                if (request.getDepartmentId() != null) {
+                    dept = departmentRepository.findById(request.getDepartmentId()).orElse(null);
+                }
+                if (dept == null) {
+                    dept = departmentRepository.findAll().stream().findFirst().orElse(null);
+                }
+
+                Course course = null;
+                if (request.getCourseId() != null) {
+                    course = courseRepository.findById(request.getCourseId()).orElse(null);
+                }
+                if (course == null && dept != null) {
+                    course = courseRepository.findByDepartment(dept).stream().findFirst().orElse(null);
+                }
+                if (course == null) {
+                    course = courseRepository.findAll().stream().findFirst().orElse(null);
+                }
+                if (dept == null && course != null) {
+                    dept = course.getDepartment();
+                }
+
+                int semester = request.getSemester() != null ? request.getSemester() : 1;
+
+                Student student = Student.builder()
+                        .user(user)
+                        .department(dept)
+                        .course(course)
+                        .semester(semester)
+                        .status(Student.StudentStatus.ACTIVE)
+                        .academicYear("2026-2027")
+                        .build();
+                student = studentRepository.save(student);
+
+                String rollNo = (refId != null) ? refId.toUpperCase(Locale.ROOT) : ("STU" + (2300 + student.getId()));
+                student.setRollNo(rollNo);
+                student = studentRepository.save(student);
+            }
+        } else if (request.getRole() == Role.FACULTY) {
+            Department dept = null;
+            if (request.getDepartmentId() != null) {
+                dept = departmentRepository.findById(request.getDepartmentId()).orElse(null);
+            }
+            if (dept == null) {
+                dept = departmentRepository.findAll().stream().findFirst().orElse(null);
+            }
+
+            String designation = request.getDesignation() != null && !request.getDesignation().isBlank()
+                    ? request.getDesignation().trim()
+                    : "Assistant Professor";
+
+            Faculty faculty = Faculty.builder()
+                    .user(user)
+                    .department(dept)
+                    .designation(designation)
+                    .status(Faculty.FacultyStatus.ACTIVE)
+                    .build();
+            facultyRepository.save(faculty);
+        }
+
+        UserDetails userDetails = userDetailsService.loadUserByUsername(user.getEmail());
+        String token = jwtService.generateToken(userDetails, user.getId(), user.getRole().name());
+        UserSummary summary = toUserSummary(user);
+
+        emailService.sendRegistrationConfirmation(user.getEmail(), user.getName());
 
         return AuthResponse.builder()
                 .token(token)
-                .role(user.getRole().name())
-                .name(user.getName())
-                .email(user.getEmail())
-                .referenceId(user.getReferenceId())
-                .userId(user.getId())
+                .user(summary)
                 .build();
     }
 
-    public AuthResponse register(RegisterRequest request) {
-        // Check if email already exists
-        if (userRepository.findByEmail(request.getEmail()).isPresent()) {
-            throw new RuntimeException("Email already registered");
+    public AuthResponse login(LoginRequest request) {
+        String email = request.getEmail().trim().toLowerCase(Locale.ROOT);
+        User user = userRepository.findByEmailIgnoreCase(email)
+                .orElseThrow(() -> new BadCredentialsException("Invalid email or password."));
+
+        if (!passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
+            throw new BadCredentialsException("Invalid email or password.");
         }
 
-        // Prevent admin registration
-        if ("ADMIN".equalsIgnoreCase(request.getRole())) {
-            throw new RuntimeException("Admin registration is not allowed");
+        if (!user.isEnabled()) {
+            throw new BadCredentialsException("Account has been disabled. Please contact administrator.");
         }
 
-        // Backend password validation (defense in depth)
-        String password = request.getPassword();
-        if (password.length() < 8) {
-            throw new RuntimeException("Password must be at least 8 characters");
-        }
-        if (!password.matches(".*[a-zA-Z].*")) {
-            throw new RuntimeException("Password must contain at least one letter");
-        }
-        if (!password.matches(".*\\d.*")) {
-            throw new RuntimeException("Password must contain at least one number");
-        }
-        if (!password.matches(".*[!@#$%^&*(),.?\":\\{\\}|<>].*")) {
-            throw new RuntimeException("Password must contain at least one special character");
-        }
+        UserDetails userDetails = userDetailsService.loadUserByUsername(user.getEmail());
+        String token = jwtService.generateToken(userDetails, user.getId(), user.getRole().name());
+        UserSummary summary = toUserSummary(user);
 
-        // Validate against admin-created records
-        String referenceId = request.getReferenceId();
-        String name = request.getName();
-
-        // Check if someone already registered with this reference ID
-        Optional<User> existingUser = userRepository.findByReferenceId(referenceId);
-        if (existingUser.isPresent()) {
-            throw new RuntimeException("An account with this ID already exists. Please login instead.");
-        }
-
-        if ("STUDENT".equalsIgnoreCase(request.getRole())) {
-            Student student = studentRepository.findByStudentId(referenceId)
-                    .orElseThrow(() -> new RuntimeException("Invalid registration. Student ID not found in admin records."));
-
-            if (!student.getName().equalsIgnoreCase(name)) {
-                throw new RuntimeException("Invalid registration. Name does not match admin records.");
-            }
-
-            // Update student email
-            student.setEmail(request.getEmail());
-            studentRepository.save(student);
-
-        } else if ("FACULTY".equalsIgnoreCase(request.getRole())) {
-            Faculty faculty = facultyRepository.findByFacultyId(referenceId)
-                    .orElseThrow(() -> new RuntimeException("Invalid registration. Faculty ID not found in admin records."));
-
-            if (!faculty.getName().equalsIgnoreCase(name)) {
-                throw new RuntimeException("Invalid registration. Name does not match admin records.");
-            }
-
-            // Update faculty email
-            faculty.setEmail(request.getEmail());
-            facultyRepository.save(faculty);
-
-        } else {
-            throw new RuntimeException("Invalid role. Must be STUDENT or FACULTY.");
-        }
-
-        // Create user account
-        User user = User.builder()
-                .name(request.getName())
-                .email(request.getEmail())
-                .password(passwordEncoder.encode(request.getPassword()))
-                .role(User.Role.valueOf(request.getRole().toUpperCase()))
-                .referenceId(referenceId)
+        return AuthResponse.builder()
+                .token(token)
+                .user(summary)
                 .build();
+    }
 
+    public UserSummary me() {
+        User user = currentUserService.getUser();
+        return toUserSummary(user);
+    }
+
+    public void logout() {
+        // Stateless JWT; client clears token from storage
+        log.debug("Logout called for current user");
+    }
+
+    @Transactional
+    public void forgotPassword(String email) {
+        userRepository.findByEmailIgnoreCase(email.trim().toLowerCase(Locale.ROOT)).ifPresent(user -> {
+            String token = UUID.randomUUID().toString();
+            PasswordResetToken resetToken = PasswordResetToken.builder()
+                    .user(user)
+                    .token(token)
+                    .expiresAt(LocalDateTime.now().plusMinutes(30))
+                    .used(false)
+                    .build();
+            passwordResetTokenRepository.save(resetToken);
+            emailService.sendPasswordResetEmail(user.getEmail(), token);
+        });
+    }
+
+    @Transactional
+    public void resetPassword(String token, String newPassword) {
+        PasswordResetToken resetToken = passwordResetTokenRepository.findByToken(token)
+                .orElseThrow(() -> new BadRequestException("Invalid or expired password reset token."));
+
+        if (resetToken.isUsed() || resetToken.getExpiresAt().isBefore(LocalDateTime.now())) {
+            throw new BadRequestException("Invalid or expired password reset token.");
+        }
+
+        User user = resetToken.getUser();
+        user.setPasswordHash(passwordEncoder.encode(newPassword));
         userRepository.save(user);
 
-        // Do NOT return a token - user must login after registration
-        return AuthResponse.builder()
-                .token(null)
-                .role(user.getRole().name())
+        resetToken.setUsed(true);
+        passwordResetTokenRepository.save(resetToken);
+    }
+
+    public UserSummary toUserSummary(User user) {
+        Long profileId = null;
+        if (user.getRole() == Role.STUDENT) {
+            profileId = studentRepository.findByUser(user).map(Student::getId).orElse(null);
+        } else if (user.getRole() == Role.FACULTY) {
+            profileId = facultyRepository.findByUser(user).map(Faculty::getId).orElse(null);
+        } else if (user.getRole() == Role.ADMIN) {
+            profileId = adminRepository.findByUser(user).map(Admin::getId).orElse(null);
+        }
+
+        return UserSummary.builder()
+                .id(user.getId())
                 .name(user.getName())
                 .email(user.getEmail())
-                .referenceId(user.getReferenceId())
-                .userId(user.getId())
+                .phone(user.getPhone())
+                .role(user.getRole().name().toLowerCase(Locale.ROOT))
+                .profileId(profileId)
                 .build();
     }
 }

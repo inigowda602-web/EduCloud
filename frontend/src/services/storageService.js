@@ -72,7 +72,7 @@ export function getData(key) {
 }
 
 /** Overwrite a collection/value entirely. */
-export function setData(key, value) {
+export function setData(key, value, source = null) {
   const ns = readNamespace();
   ns[key] = value;
   writeNamespace(ns);
@@ -80,7 +80,7 @@ export function setData(key, value) {
   // this key — e.g. a Student submits feedback while a Faculty page is
   // already open, so it can refresh without waiting for a remount.
   if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-    window.dispatchEvent(new CustomEvent("educloud-storage-update", { detail: { key } }));
+    window.dispatchEvent(new CustomEvent("educloud-storage-update", { detail: { key, source } }));
   }
   return value;
 }
